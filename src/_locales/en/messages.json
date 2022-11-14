@@ -1,0 +1,8 @@
+{
+  "extName" : {
+    "message": "Amazon Japan Order History Downloader"
+  },
+  "extDesc" : {
+    "message": "For use on Amazon Japan. Fetch order details (date, item names, etc) from the Order History page and download as CSV file"
+  } 
+}
