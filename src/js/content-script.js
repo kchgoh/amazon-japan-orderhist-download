@@ -25,21 +25,25 @@ let pageCompleted = false;
 // the addon runs on the order history page. strangely, there isn't just one URL for it.
 // depending on where you click from, Amazon JP may show order history at one of the several URLs. 
 // that's why in the manifest, there are several URL match patterns:
-// - click top nav bar => https://www.amazon.co.jp/gp/css/order-history...
-// - click another page of history from above page => https://www.amazon.co.jp/your-orders/order...
-// - select year dropdown => https://www.amazon.co.jp/gp/your-account/order-history...
-// - click another page of history from above page => same (why???)
+// 1. click top nav bar => https://www.amazon.co.jp/gp/css/order-history...
+// 2. click another page of history  => https://www.amazon.co.jp/your-orders/order...
+// 3. click on another menu link like "Buy Again" then go back to the "Orders" page => https://www.amazon.co.jp/gp/your-account/order-history...
 //
 // to make life difficult, these pages have somewhat different DOM:
-// one has class "order-card", another doesn't; some has one level of "js-order-card", some has two.
-// the one consistent class i noticed is "order-info"
-const orderCards = document.getElementsByClassName('order-info');
+// #1 #2 have class "order-card", #3 doesn't; #2 #3 have one level of "js-order-card", #1 has two.
+// so below is the solution:
+// use "order-card" if exists (#1 #2)
+// else use "js-order-card" (#3)
+let orderCards = document.getElementsByClassName('order-card');
+if (orderCards.length == 0) {
+  orderCards = document.getElementsByClassName('js-order-card');
+}
 if (orderCards.length > 0) {
   const firstOrderCard = orderCards[0];
-  const orderCardsParent = firstOrderCard.parentNode;
+  const firstChild = firstOrderCard.firstChild;
   const gui = createActionGUI();
   statusDiv = gui.statusDiv;
-  orderCardsParent.insertBefore(gui.actionContainerDiv, firstOrderCard);
+  firstOrderCard.insertBefore(gui.actionContainerDiv, firstChild);
 }  
 
 // // DEBUG: don't know if it's problem with brower - content script just does not show up in debugger
@@ -233,13 +237,29 @@ function getOrderItemsOnInvoicePage(pageDom, orderDetails) {
   }
 }
 
-function getOrderDateOnInvoicePage(pageDom) {
+// getting the date element is again very tricky, as the order date (注文日) doesn't always appear in the same cell on the invoice page.
+// here are the patterns found:
+// 1. the 1st cell is "注文日".
+// 2. the 2nd cell is "注文日", but the first cell is "再発行日" (we don't want this).
+// 3. there is no "注文日" at all, but the order date is in "「定期おトク便」のご注文が確定しました <date>"
+// so the solution is to loop all the cels and try find a match
+function getOrderDateElement(pageDom) {
   const mainTable = pageDom.getElementsByTagName('table')[1];
-  const orderDateElement = mainTable.getElementsByTagName('td')[2];
+  const cells = mainTable.getElementsByTagName('td');
+  for (let cell of cells) {
+    if (cell.textContent.includes('注文') && cell.textContent.includes('日')) {
+      return cell;
+    }
+  }
+  throw 'No date found';
+}
+
+function getOrderDateOnInvoicePage(pageDom) {
+  const orderDateElement = getOrderDateElement(pageDom);
   const orderDateParts = orderDateElement.textContent.match(orderDateRegEx);
 
   if (!orderDateParts || orderDateParts.length != 3) {
-    throw 'Wrong date';
+    throw 'Wrong date: ' + orderDateElement.textContent;
   }
   if (orderDateParts[0].length != 4) {
     throw 'Wrong year';
