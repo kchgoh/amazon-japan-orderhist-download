@@ -17,10 +17,19 @@ const STORE_KEY_ORDER_COUNT = "HIST_ADDON_COUNT";
 const STORE_KEY_DATE_MAX = 'HIST_ADDON_DATE_MAX';
 const STORE_KEY_DATE_MIN = 'HIST_ADDON_DATE_MIN';
 
+const CurrentPageStatus = Object.freeze({
+  DEFAULT: 'DEFAULT',
+  PROCESSING: 'PROCESSING',
+  COMPLETED: 'COMPLETED'
+});
+
 // global vars
 
 let statusDiv = null;
-let pageCompleted = false;
+let currPageStatus = CurrentPageStatus.DEFAULT;
+let currPageOrderCount = 0;
+let currPageOrderCountCancelled = 0;
+let currPageItemCount = 0;
 
 // the addon runs on the order history page. strangely, there isn't just one URL for it.
 // depending on where you click from, Amazon JP may show order history at one of the several URLs. 
@@ -91,15 +100,35 @@ function addPadding(e) {
 function getStatusText() {
   // if there is a count, then we have fetched something, so there must also be dates
   if (sessionStorage.getItem(STORE_KEY_ORDER_COUNT)) {
-    return 'Fetched order(s): ' + sessionStorage.getItem(STORE_KEY_ORDER_COUNT) + '. Date(s): ' 
+    return 'Total fetched order(s): ' + sessionStorage.getItem(STORE_KEY_ORDER_COUNT) + '. Date(s): ' 
       + sessionStorage.getItem(STORE_KEY_DATE_MIN) + ' to ' + sessionStorage.getItem(STORE_KEY_DATE_MAX) + '. '
-      + (pageCompleted ? 'Page completed' : '');
+      + getCurrPageStatusText();
   }
   return "Fetched order(s): 0";
 }
 
+function getCurrPageStatusText() {
+  if (currPageStatus === CurrentPageStatus.COMPLETED) {
+    let text = '<br/>Current page completed: ' + currPageOrderCount + ' order(s)';
+    if (currPageOrderCountCancelled > 0) {
+      text = text + ' (' + currPageOrderCountCancelled + ' cancelled)';
+    }
+    text = text + ' ' + currPageItemCount + ' items';
+    return text;
+  } else if (currPageStatus === CurrentPageStatus.PROCESSING) {
+    return '<br/>Current page processing...';
+  }
+  return '';
+}
+
 async function onClickFetchAllOrdersOnCurrentPage() {
   console.log("start fetch");
+
+  currPageStatus = CurrentPageStatus.PROCESSING;
+  currPageOrderCount = 0;
+  currPageOrderCountCancelled = 0;
+  currPageItemCount = 0;
+
   const orderCardsArray = Array.from(orderCards);
   // // DEBUG
   // let testCount = 0;
@@ -109,14 +138,13 @@ async function onClickFetchAllOrdersOnCurrentPage() {
     const orderID = orderIDDesc.match(orderIDRegEx)[0];
     console.log(orderID);
 
-    // the digital purchase invoice page is a completely different DOM structure
-    // i don't use it much for now so ignore it TODO show this as warning on page 
-    if (orderID.startsWith('D')) {
-      console.warn("Skipping: do not support Digital purchase yet: " + orderID);
-      continue;
+    if (isCancelledOrder(orderCardElement)) {
+      console.info("Cancelled order: " + orderID)
+      ++currPageOrderCountCancelled;
+      incOrderCount();
+    } else {
+      await fetchInvoicePage(orderID);
     }
-
-    await fetchInvoicePage(orderID);
 
     // // DEBUG: only get 2 orders for test
     // if (++testCount == 2) {
@@ -124,10 +152,15 @@ async function onClickFetchAllOrdersOnCurrentPage() {
     //   return;
     // }
   }
-  pageCompleted = true;
+  currPageStatus = CurrentPageStatus.COMPLETED;
   statusDiv.innerHTML = getStatusText();
 
   console.log('fetch end');
+}
+
+function isCancelledOrder(orderCardElement) {
+  const shipStatusText = orderCardElement.querySelector(".yohtmlc-shipment-status-primaryText")?.textContent;
+  return shipStatusText && (shipStatusText.includes('キャンセル済み') || shipStatusText.includes('返品商品を受領済み'));
 }
 
 async function fetchInvoicePage(orderID) {
@@ -189,28 +222,36 @@ function incOrderCount() {
     orderCount = Number(orderCount) + 1;
   }
   sessionStorage.setItem(STORE_KEY_ORDER_COUNT, orderCount);
+
+  ++currPageOrderCount;
 }
 
 function getOrderItemsOnInvoicePage(pageDom, orderDetails) {
-  // not much identifier to find the products as the structure is mainly nested tables
-  // but noted there is an <input type="hidden"> element in each product row
-  // so use that as anchor, then find the parent (<tr>). the two child <td>s are product details and price
-  // the product name itself happens to be in <i>, so use that to extract.
-  // structure:
-  // <tr>
-  // <input type=hidden>
-  // <td> {count} <i>{product name}</i> {seller}
-  // <td> Yen {price}
-  const inputElements = pageDom.getElementsByTagName('input');
-  const hiddenInputs = Array.from(inputElements).filter(i => i.getAttribute('type') === 'hidden');
-  for (let hiddenInput of hiddenInputs) {
-    // not sure what this is, but this is not the element we look for in the product row
-    if (hiddenInput.name === 'ue_back') {
-      continue;
-    }
-    const productRow = hiddenInput.parentElement;
-    const productName = productRow.getElementsByTagName('i')[0].textContent;
-    const productPriceMatch = productRow.getElementsByTagName('td')[1].textContent.match(priceRegEx);
+
+  // the item nesting is not consistent.
+  // sometimes it can be a single div[data-component="purchasedItems"] containing multiple items,
+  // but sometimes it can multiple divs of "purchasedItems"
+  // so just ignore the specific nesting, just get the list of grids
+
+  // most of the required details are in the right grid (the purchase item details),
+  // but annoyingly for multiple quantity the value is only in the left grid (the purhcase item image).
+  // so need to get both, and sanity check that both grids have same number of rows.
+  const productRowsLeft = pageDom.querySelectorAll('div[data-component="purchasedItemsLeftGrid"]');
+  const productRowsRight = pageDom.querySelectorAll('div[data-component="purchasedItemsRightGrid"]');
+
+  if (!productRowsLeft || !productRowsRight) {
+    throw 'Purchased item not found in order';
+  }
+  if (productRowsLeft.length != productRowsRight.length) {
+    throw 'Purchased item left and right rows not matching';
+  }
+
+  for (let i = 0; i < productRowsRight.length; ++i) {
+
+    const productRow = productRowsRight[i];
+    const productName = productRow.querySelector('div[data-component="itemTitle"]').textContent.trim();
+
+    const productPriceMatch = productRow.querySelector('div[data-component="unitPrice"]').textContent.match(priceRegEx);
     // for a returned item, it will still show up as an item line, but without a price
     if (!productPriceMatch || productPriceMatch.length != 1) {
       console.log("No price for item: " + productName);
@@ -218,9 +259,13 @@ function getOrderItemsOnInvoicePage(pageDom, orderDetails) {
     }
     // extract the price and strip thousand comma sep
     const productPrice = Number(productPriceMatch[0].replace(',', ''));
-    // price is per unit. it just happens that the hidden input value SEEMS to be the number of unit
-    // so calculate the total price as follow
-    const productCount = Number(hiddenInput.getAttribute('value'));
+
+    // price is per unit. by default qty is 1, but if > 1, the page shows a tiny number below the product image. so try extract it.
+    // NB: there is a [data-component=quantity], but it is blank, so can't use it.
+    const productImageElem = productRowsLeft[i].querySelector('div[data-component="itemImage"]');
+    const multiQty = productImageElem.querySelector('.od-item-view-qty')?.textContent.trim();
+    const productCount = multiQty ? Number(multiQty) : 1;
+
     const productTotalPrice = productPrice * productCount;
 
     // if more than 1, then add a count suffix
@@ -234,22 +279,14 @@ function getOrderItemsOnInvoicePage(pageDom, orderDetails) {
     orderItem.price = productTotalPrice;
 
     orderDetails.items.push(orderItem);
+    ++currPageItemCount;
   }
 }
 
-// getting the date element is again very tricky, as the order date (注文日) doesn't always appear in the same cell on the invoice page.
-// here are the patterns found:
-// 1. the 1st cell is "注文日".
-// 2. the 2nd cell is "注文日", but the first cell is "再発行日" (we don't want this).
-// 3. there is no "注文日" at all, but the order date is in "「定期おトク便」のご注文が確定しました <date>"
-// so the solution is to loop all the cels and try find a match
 function getOrderDateElement(pageDom) {
-  const mainTable = pageDom.getElementsByTagName('table')[1];
-  const cells = mainTable.getElementsByTagName('td');
-  for (let cell of cells) {
-    if (cell.textContent.includes('注文') && cell.textContent.includes('日')) {
-      return cell;
-    }
+  var dateElem = pageDom.querySelector('div[data-component="orderDate"]');
+  if (dateElem) {
+    return dateElem;
   }
   throw 'No date found';
 }
@@ -309,7 +346,12 @@ function onClickReset() {
   sessionStorage.removeItem(STORE_KEY_ORDER_COUNT);
   sessionStorage.removeItem(STORE_KEY_DATE_MIN);
   sessionStorage.removeItem(STORE_KEY_DATE_MAX);
-  pageCompleted = false;
+
+  currPageStatus = CurrentPageStatus.DEFAULT;
+  currPageOrderCount = 0;
+  currPageOrderCountCancelled = 0;
+  currPageItemCount = 0;
+
   warnMsg = '';
   statusDiv.innerHTML = getStatusText();
 

@@ -1,8 +1,8 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "__MSG_extName__",
   "description": "__MSG_extDesc__",
-  "version": "1.1",
+  "version": "2.0",
   "homepage_url": "https://github.com/kchgoh/amazon-japan-orderhist-download",
   "default_locale": "en",
   "icons": {
